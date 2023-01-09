@@ -35,6 +35,12 @@ struct Cli {
 
     #[arg(short, long, help = "Don't ask for confirmation before committing.")]
     force: bool,
+
+    #[arg(short, long, help = "Number of commit messages to generate.", default_value = "1")]
+    num_messages: u64,
+
+    #[arg(short, long, help = "Temperature.", default_value = "0.05")]
+    temperature: f64,
 }
 
 #[tokio::main]
@@ -94,8 +100,9 @@ async fn main() -> Result<(), ()> {
             output
         ))
         .engine("code-davinci-002")
-        .temperature(0.0)
-        .max_tokens(2000)
+        .n(cli.num_messages)
+        .temperature(cli.temperature)
+        .max_tokens(512)
         .stop(vec!["EOF".into()]);
 
     let sp: Option<Spinner> = if !cli.dry_run && cli.verbose.is_silent() {
@@ -142,54 +149,69 @@ async fn main() -> Result<(), ()> {
         sp.unwrap().stop_with_message("Finished Analyzing!".into());
     }
 
-    let commit_msg = completion.choices[0].text.to_owned();
+    let mut commit_msg = None;
 
     if cli.dry_run {
-        info!("{}", commit_msg);
+        info!("{}", completion.choices[0].text.to_owned());
         return Ok(());
-    } else {
+    } 
+    
+    for choice in completion.choices {
+        let potential_commit_msg = choice.text.to_owned();
+
         info!(
             "Proposed Commit:\n------------------------------\n{}\n------------------------------",
-            commit_msg
+            potential_commit_msg
         );
 
-        if !cli.force {
-            let answer = Question::new("Do you want to continue? (Y/n)")
-                .yes_no()
-                .until_acceptable()
-                .default(Answer::YES)
-                .ask()
-                .expect("Couldn't ask question.");
+        if cli.force {
+            commit_msg = Some(potential_commit_msg);
+            break;
+        }
 
-            if answer == Answer::NO {
-                error!("Commit aborted by user.");
-                std::process::exit(1);
-            }
-            info!("Committing Message...");
+        let answer = Question::new("Do you want to use this commit message? (y/N)")
+            .yes_no()
+            .until_acceptable()
+            .default(Answer::NO)
+            .ask()
+            .expect("Couldn't ask question.");
+
+        if answer == Answer::YES {
+            commit_msg = Some(potential_commit_msg);
+            break;
         }
     }
 
-    let mut ps_commit = Command::new("git")
-        .arg("commit")
-        .args(if cli.review { vec!["-e"] } else { vec![] })
-        .arg("-F")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
+    match commit_msg {
+        Some(commit_msg) => {
+            info!("Committing Message...");
 
-    let mut stdin = ps_commit.stdin.take().expect("Failed to open stdin");
-    std::thread::spawn(move || {
-        stdin
-            .write_all(commit_msg.as_bytes())
-            .expect("Failed to write to stdin");
-    });
+            let mut ps_commit = Command::new("git")
+                .arg("commit")
+                .args(if cli.review { vec!["-e"] } else { vec![] })
+                .arg("-F")
+                .arg("-")
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
 
-    let commit_output = ps_commit
-        .wait_with_output()
-        .expect("There was an error when creating the commit.");
+            let mut stdin = ps_commit.stdin.take().expect("Failed to open stdin");
+            std::thread::spawn(move || {
+                stdin
+                    .write_all(commit_msg.as_bytes())
+                    .expect("Failed to write to stdin");
+            });
 
-    info!("{}", str::from_utf8(&commit_output.stdout).unwrap());
+            let commit_output = ps_commit
+                .wait_with_output()
+                .expect("There was an error when creating the commit.");
+
+            info!("{}", str::from_utf8(&commit_output.stdout).unwrap());
+        },
+        None => {
+            info!("No message was selected");
+        }
+    }
 
     Ok(())
 }
